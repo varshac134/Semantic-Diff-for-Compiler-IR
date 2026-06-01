@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.ll
+*.o
+*.exe
+demo_old.c
+demo_new.c
+demo_report.html
+test_report.html
+*.tmp
+.vscode/
+.idea/
