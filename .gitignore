@@ -13,4 +13,5 @@ pip-wheel-metadata/
 .tox/
 .pytest_cache/
 *.log
+tmp_dashboard/
 tools/llvm/
