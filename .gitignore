@@ -1,0 +1,16 @@
+﻿__pycache__/
+*.py[cod]
+*.so
+.Python
+venv/
+.venv/
+ENV/
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+.tox/
+.pytest_cache/
+*.log
+tools/llvm/
