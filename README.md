@@ -18,6 +18,17 @@ cd c:\Users\chind\Downloads\fight\model_release
 .\.venv\Scripts\semantic-ir-diff old_file.c new_file.c --opt-level -O3
 ```
 
+## Example inputs
+
+The repository includes example source and LLVM IR inputs in `examples/`.
+
+```powershell
+cd c:\Users\chind\Downloads\semantic_ir_diff_project
+python -m semantic_ir_diff.cli examples\old.ll examples\new.ll --old-ir --new-ir --report-detail all
+```
+
+For more details, see `examples/README.md`.
+
 For evaluation across commit pairs:
 
 ```powershell
