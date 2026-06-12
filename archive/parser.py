@@ -87,7 +87,8 @@ class Function:
 
     def add_block(self, block):
         self.blocks[block.label] = block
-        self.block_order.append(block.label)
+        if block.label not in self.block_order:
+            self.block_order.append(block.label)
 
     def build_cfg(self):
         """

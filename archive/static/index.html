@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantic Diff for Compiler IR</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Stylesheet -->
+    <link rel="stylesheet" href="styles.css">
+    <!-- Mermaid.js for CFG rendering (v10+ ESM Compatibility) -->
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.esm.min.mjs';
+        window.mermaid = mermaid;
+        mermaid.initialize({
+            theme: 'dark',
+            startOnLoad: false,
+            securityLevel: 'loose',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis'
+            }
+        });
+    </script>
+</head>
+<body>
+    <div class="glow-container">
+        <div class="glow-sphere glow-1"></div>
+        <div class="glow-sphere glow-2"></div>
+    </div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo">
+                <i class="fa-solid fa-code-compare logo-icon"></i>
+                <span class="logo-text">Antigravity <span class="gradient-text">IR Diff</span></span>
+            </div>
+            <p class="subtitle">Semantic Diff & Optimization Analyzer for LLVM Compiler IR</p>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="workspace">
+            
+            <!-- Input Section -->
+            <section class="panel input-panel">
+                <div class="panel-tabs">
+                    <button class="tab-btn active" data-tab="ir-mode">
+                        <i class="fa-solid fa-cube"></i> Upload / Paste LLVM IR
+                    </button>
+                    <button class="tab-btn" data-tab="code-mode">
+                        <i class="fa-solid fa-microchip"></i> Compile C/C++ Source
+                    </button>
+                </div>
+
+                <div class="tab-content active" id="ir-mode-content">
+                    <div class="input-grid">
+                        <div class="input-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-history"></i> Original LLVM IR (.ll)</h3>
+                                <div class="file-input-wrapper">
+                                    <label class="btn-secondary file-label">
+                                        <i class="fa-solid fa-upload"></i> Load file
+                                        <input type="file" id="file-ir1" accept=".ll">
+                                    </label>
+                                </div>
+                            </div>
+                            <textarea id="text-ir1" placeholder="Paste your first LLVM IR here (e.g. define void @foo() { ... })..."></textarea>
+                        </div>
+                        
+                        <div class="input-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-code"></i> Modified LLVM IR (.ll)</h3>
+                                <div class="file-input-wrapper">
+                                    <label class="btn-secondary file-label">
+                                        <i class="fa-solid fa-upload"></i> Load file
+                                        <input type="file" id="file-ir2" accept=".ll">
+                                    </label>
+                                </div>
+                            </div>
+                            <textarea id="text-ir2" placeholder="Paste your second LLVM IR here..."></textarea>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content" id="code-mode-content">
+                    <div class="compile-settings">
+                        <div class="setting-item">
+                            <label for="select-lang">Language</label>
+                            <select id="select-lang">
+                                <option value="c">C (clang)</option>
+                                <option value="cpp">C++ (clang++)</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label for="opt-level-1">Old Opt Level</label>
+                            <select id="opt-level-1">
+                                <option value="-O0" selected>-O0 (No Optimization)</option>
+                                <option value="-O1">-O1 (Optimize Size/Speed)</option>
+                                <option value="-O2">-O2 (Standard Optimization)</option>
+                                <option value="-O3">-O3 (Aggressive Optimization)</option>
+                                <option value="-Ofast">-Ofast (Relax standards)</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label for="opt-level-2">New Opt Level</label>
+                            <select id="opt-level-2">
+                                <option value="-O0">-O0</option>
+                                <option value="-O1">-O1</option>
+                                <option value="-O2">-O2</option>
+                                <option value="-O3" selected>-O3 (Aggressive Optimization)</option>
+                                <option value="-Ofast">-Ofast</option>
+                            </select>
+                        </div>
+                        <div class="setting-item flags-item">
+                            <label for="input-flags">Clang Flags (comma separated)</label>
+                            <input type="text" id="input-flags" placeholder="-ffast-math, -fno-vectorize" value="">
+                        </div>
+                    </div>
+
+                    <div class="input-grid">
+                        <div class="input-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-file-code"></i> Original C/C++ Code</h3>
+                                <div class="file-input-wrapper">
+                                    <label class="btn-secondary file-label">
+                                        <i class="fa-solid fa-upload"></i> Load file
+                                        <input type="file" id="file-code1" accept=".c,.cpp,.cc,.cxx">
+                                    </label>
+                                </div>
+                            </div>
+                            <textarea id="text-code1" placeholder="Type or paste original C/C++ source code here..."></textarea>
+                        </div>
+                        
+                        <div class="input-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-file-code"></i> Modified C/C++ Code <span class="badge-optional">Optional</span></h3>
+                                <div class="file-input-wrapper">
+                                    <label class="btn-secondary file-label">
+                                        <i class="fa-solid fa-upload"></i> Load file
+                                        <input type="file" id="file-code2" accept=".c,.cpp,.cc,.cxx">
+                                    </label>
+                                </div>
+                            </div>
+                            <textarea id="text-code2" placeholder="Type or paste modified code here. Leave blank to compare the same original code under different optimization levels."></textarea>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <button id="btn-analyze" class="btn-primary">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> Analyze Semantic Diff
+                    </button>
+                </div>
+            </section>
+
+            <!-- Results Section (Initially Hidden) -->
+            <section id="results-panel" class="results-container hidden">
+                
+                <!-- Title Row -->
+                <div class="results-header">
+                    <h2><i class="fa-solid fa-square-poll-vertical"></i> Analysis Results: <span id="report-title">Report</span></h2>
+                    <button id="btn-download" class="btn-accent">
+                        <i class="fa-solid fa-download"></i> Download Report
+                    </button>
+                </div>
+
+                <!-- Statistics Dashboard -->
+                <div class="stats-dashboard">
+                    <div class="stat-card">
+                        <span class="stat-label">Functions Compared</span>
+                        <span id="stat-compared" class="stat-value">0</span>
+                        <div class="stat-footer">
+                            <span class="sub-stat"><span id="stat-added" class="color-added">0</span> added</span>
+                            <span class="sub-stat"><span id="stat-deleted" class="color-deleted">0</span> deleted</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Semantic Changes</span>
+                        <span id="stat-changed" class="stat-value">0</span>
+                        <div class="stat-footer">
+                            <span class="sub-stat">Modified functions</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Instruction Delta</span>
+                        <span class="stat-value">
+                            <span id="stat-inst-added" class="color-added">+0</span> / 
+                            <span id="stat-inst-deleted" class="color-deleted">-0</span>
+                        </span>
+                        <div class="stat-footer">
+                            <span class="sub-stat">Total added/deleted instructions</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Optimization Flags</span>
+                        <span id="stat-impact" class="stat-value color-high">0</span>
+                        <div class="stat-footer">
+                            <span class="sub-stat">High-priority optimizations</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Semantic Summary Panel -->
+                <div class="panel summary-panel">
+                    <div class="panel-header">
+                        <h3><i class="fa-solid fa-circle-info"></i> Semantic Summary</h3>
+                    </div>
+                    <div id="events-timeline" class="events-list">
+                        <!-- Filled by JS -->
+                    </div>
+                </div>
+
+                <!-- Split Workspace -->
+                <div class="workbench-grid">
+                    <!-- Sidebar list of functions -->
+                    <div class="panel functions-panel">
+                        <div class="panel-header">
+                            <h3><i class="fa-solid fa-list-check"></i> Functions</h3>
+                        </div>
+                        <ul id="list-functions" class="functions-list">
+                            <!-- Filled by JS -->
+                        </ul>
+                    </div>
+
+                    <!-- Main comparison workbench -->
+                    <div class="panel detail-panel">
+                        <div class="panel-header detail-header">
+                            <h3 id="current-function-name"><i class="fa-solid fa-terminal"></i> Select a function</h3>
+                            <div class="header-metadata" id="function-metadata">
+                                <!-- Metadata goes here -->
+                            </div>
+                        </div>
+
+                        <div id="function-content-wrapper" class="hidden">
+                            <!-- Local Semantic Events -->
+                            <div class="local-events-wrapper">
+                                <h4>💡 Optimization Insights</h4>
+                                <div id="local-events-list"></div>
+                            </div>
+
+                            <!-- CFG Side-by-Side Graph Rendering -->
+                            <div class="cfg-comparison">
+                                <h4>📊 Control Flow Graph (CFG)</h4>
+                                <div class="cfg-grid">
+                                    <div class="cfg-graph-wrapper">
+                                        <div class="cfg-graph-title">Original CFG</div>
+                                        <div id="cfg-graph-old" class="cfg-svg-container"></div>
+                                    </div>
+                                    <div class="cfg-graph-wrapper">
+                                        <div class="cfg-graph-title">Modified CFG</div>
+                                        <div id="cfg-graph-new" class="cfg-svg-container"></div>
+                                    </div>
+                                </div>
+                                <div class="cfg-hint">
+                                    <i class="fa-solid fa-lightbulb"></i> Tip: Click on any block in the CFGs to highlight and scroll to its instruction diff below!
+                                </div>
+                            </div>
+
+                            <!-- Basic Block Splits -->
+                            <div class="block-split-section">
+                                <h4>🔍 Basic Block Split Diff</h4>
+                                <div id="block-diffs-container" class="block-diffs-list">
+                                    <!-- Filled by JS -->
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="no-function-selected" class="no-selection-placeholder">
+                            <i class="fa-solid fa-diagram-project placeholder-icon"></i>
+                            <p>Select a changed function from the list on the left to inspect its Control Flow Graphs and Instruction Diff.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="overlay hidden">
+        <div class="loader-content">
+            <div class="spinner"></div>
+            <p id="loading-message">Analyzing IR and compiling Control Flow Graphs...</p>
+        </div>
+    </div>
+
+    <!-- Error Modal -->
+    <div id="error-modal" class="overlay hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-triangle-exclamation"></i> Error Encountered</h3>
+                <button class="modal-close" id="btn-close-error">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="error-text" class="error-msg">Failed to execute analysis.</p>
+                <div class="error-details-wrapper">
+                    <span class="details-label">Details / Compiler Output:</span>
+                    <pre id="error-details"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script -->
+    <script src="script.js"></script>
+</body>
+</html>
