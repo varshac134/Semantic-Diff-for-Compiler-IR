@@ -99,47 +99,192 @@ class ConstantPropagationDetector(BaseDetector):
 
 class CommonSubexpressionEliminationDetector(BaseDetector):
     priority = 80
+    
+    def _build_expression_table(self, func):
+        """
+        Build an expression table for a function.
+        Maps: canonical_expression -> list of (block_label, instruction, lhs)
+        
+        This is the core data structure described in the user's algorithm:
+        Expression Table: unordered_map<string, string> exprTable
+        """
+        expr_table = {}  # canonical_rhs -> [(block, inst, lhs)]
+        
+        for lbl in func.block_order:
+            for inst in func.blocks[lbl].instructions:
+                if inst.lhs and inst.opcode and inst.category not in ("Control Flow", "Function"):
+                    # Build canonical RHS: "opcode operand1, operand2, ..."
+                    canonical_rhs = self._canonical_expression(inst)
+                    if canonical_rhs:
+                        expr_table.setdefault(canonical_rhs, []).append((lbl, inst, inst.lhs))
+        
+        return expr_table
+    
+    def _canonical_expression(self, inst):
+        """
+        Create a canonical string for the RHS of an instruction.
+        Strips type info and focuses on opcode + operands.
+        For commutative operations, sorts operands for equivalence.
+        """
+        if not inst.opcode or not inst.operands:
+            return None
+        
+        commutative_ops = {"add", "mul", "fadd", "fmul", "and", "or", "xor"}
+        ops = list(inst.operands)
+        
+        if inst.opcode in commutative_ops and len(ops) == 2:
+            ops.sort()
+        
+        return f"{inst.opcode}({', '.join(ops)})"
+    
+    def _build_value_map(self, func):
+        """
+        Build a map from LHS variable -> canonical expression.
+        This enables transitive expression tracking:
+          %t1 = add %a, %b         -> value_map[%t1] = "add(%a, %b)"
+          %t3 = mul %t1, %c        -> value_map[%t3] = "mul(%t1, %c)"
+        """
+        value_map = {}  # lhs -> canonical_rhs
+        for lbl in func.block_order:
+            for inst in func.blocks[lbl].instructions:
+                if inst.lhs and inst.opcode and inst.category not in ("Control Flow", "Function"):
+                    canonical = self._canonical_expression(inst)
+                    if canonical:
+                        value_map[inst.lhs] = canonical
+        return value_map
+    
+    def _resolve_expression(self, expr, value_map, depth=0):
+        """
+        Recursively resolve an expression by substituting temporaries.
+        e.g. "mul(%t1, %c)" where value_map[%t1] = "add(%a, %b)"
+             -> "mul(add(%a, %b), %c)"
+        This allows detecting that two expressions are the same
+        even when one uses intermediaries.
+        """
+        if depth > 5:  # Prevent infinite recursion
+            return expr
+        
+        import re
+        resolved = expr
+        # Find all %variables in the expression
+        vars_in_expr = re.findall(r'%[a-zA-Z0-9._]+', expr)
+        for var in vars_in_expr:
+            if var in value_map:
+                resolved = resolved.replace(var, value_map[var])
+        
+        if resolved != expr:
+            return self._resolve_expression(resolved, value_map, depth + 1)
+        return resolved
+    
     def detect(self, func_diff, old_func, new_func):
         events = []
-        old_rhs_counts = {}
-        for lbl in old_func.block_order:
-            for inst in old_func.blocks[lbl].instructions:
-                if inst.lhs and inst.opcode and inst.category != "Control Flow":
-                    rhs = f"{inst.opcode} " + ", ".join(inst.operands)
-                    old_rhs_counts[rhs] = old_rhs_counts.get(rhs, 0) + 1
-                    
-        new_rhs_counts = {}
-        for lbl in new_func.block_order:
-            for inst in new_func.blocks[lbl].instructions:
-                if inst.lhs and inst.opcode and inst.category != "Control Flow":
-                    rhs = f"{inst.opcode} " + ", ".join(inst.operands)
-                    new_rhs_counts[rhs] = new_rhs_counts.get(rhs, 0) + 1
-                    
-        cse_count = 0
-        claimed_pcs = []
         
-        for rhs, old_count in old_rhs_counts.items():
-            new_count = new_rhs_counts.get(rhs, 0)
+        # Step 1: Build expression tables for old and new functions
+        old_expr_table = self._build_expression_table(old_func)
+        new_expr_table = self._build_expression_table(new_func)
+        
+        # Step 2: Build value maps for transitive resolution
+        old_value_map = self._build_value_map(old_func)
+        new_value_map = self._build_value_map(new_func)
+        
+        # Step 3: Find expressions that appeared multiple times in old
+        #         but fewer times (or once) in new -> CSE was applied
+        cse_expressions = []
+        cse_count = 0
+        
+        for rhs, old_occurrences in old_expr_table.items():
+            new_occurrences = new_expr_table.get(rhs, [])
+            
+            if len(old_occurrences) > 1 and len(new_occurrences) < len(old_occurrences):
+                eliminated = len(old_occurrences) - len(new_occurrences)
+                cse_count += eliminated
+                cse_expressions.append((rhs, old_occurrences, eliminated))
+        
+        # Step 4: Deep equivalence check using resolved expressions
+        #         Detect CSE even when the new IR uses different temporaries
+        #         e.g. old has "add(%a, %b)" 3 times, new has it once as %t1
+        #              and other places use %t1 directly
+        old_resolved_counts = {}
+        for rhs in old_expr_table:
+            resolved = self._resolve_expression(rhs, old_value_map)
+            old_resolved_counts[resolved] = old_resolved_counts.get(resolved, 0) + len(old_expr_table[rhs])
+        
+        new_resolved_counts = {}
+        for rhs in new_expr_table:
+            resolved = self._resolve_expression(rhs, new_value_map)
+            new_resolved_counts[resolved] = new_resolved_counts.get(resolved, 0) + len(new_expr_table[rhs])
+        
+        for resolved_rhs, old_count in old_resolved_counts.items():
+            new_count = new_resolved_counts.get(resolved_rhs, 0)
             if old_count > 1 and new_count > 0 and new_count < old_count:
-                cse_count += (old_count - new_count)
+                additional = old_count - new_count
+                # Only count if not already counted in direct match
+                if additional > cse_count:
+                    cse_count = additional
+        
+        # Step 5: Check for hoisted temporaries (expressions moved to dominator block)
+        #         In the user's example: (a+b) computed in both if/else branches
+        #         gets hoisted to a single t1 = a+b before the if/else
+        hoisted_count = 0
+        for rhs, new_occurrences in new_expr_table.items():
+            if len(new_occurrences) == 1:
+                new_block, new_inst, new_lhs = new_occurrences[0]
+                # Check if this temporary is used in multiple blocks
+                uses_in_blocks = set()
+                for lbl in new_func.block_order:
+                    for inst in new_func.blocks[lbl].instructions:
+                        if new_lhs in inst.operands:
+                            uses_in_blocks.add(lbl)
                 
-                # claim corresponding instructions
-                for pc in func_diff.primitive_changes:
-                    if getattr(pc, "claimed", False): continue
-                    if pc.type in ("REMOVE_INSTRUCTION", "MODIFY_INSTRUCTION") and pc.old_inst:
-                        pc_rhs = f"{pc.old_inst.opcode} " + ", ".join(pc.old_inst.operands)
-                        if pc_rhs == rhs:
-                            claimed_pcs.append(pc)
-                
+                if len(uses_in_blocks) > 1:
+                    # This value is computed once but used across multiple blocks
+                    # Check if the old IR had the same expression in those blocks
+                    old_occurrences = old_expr_table.get(rhs, [])
+                    old_blocks_with_expr = {occ[0] for occ in old_occurrences}
+                    
+                    if len(old_blocks_with_expr) > 1:
+                        hoisted_count += len(old_blocks_with_expr) - 1
+        
+        cse_count = max(cse_count, hoisted_count)
+        
+        # Step 6: Claim primitive changes
+        claimed_pcs = []
         if cse_count > 0:
+            for pc in func_diff.primitive_changes:
+                if getattr(pc, "claimed", False): continue
+                if pc.type in ("REMOVE_INSTRUCTION", "MODIFY_INSTRUCTION") and pc.old_inst:
+                    pc_canonical = self._canonical_expression(pc.old_inst)
+                    if pc_canonical:
+                        # Check if this expression exists in our CSE set
+                        for cse_rhs, old_occs, _ in cse_expressions:
+                            if pc_canonical == cse_rhs:
+                                claimed_pcs.append(pc)
+                                break
+                        else:
+                            # Also check resolved equivalence
+                            pc_resolved = self._resolve_expression(pc_canonical, old_value_map)
+                            for cse_rhs, old_occs, _ in cse_expressions:
+                                cse_resolved = self._resolve_expression(cse_rhs, old_value_map)
+                                if pc_resolved == cse_resolved:
+                                    claimed_pcs.append(pc)
+                                    break
+            
             for pc in claimed_pcs: pc.claimed = True
+            
+            # Build details with expression table
+            expr_details = []
+            for rhs, old_occs, elim in cse_expressions[:5]:
+                blocks = ", ".join(set(occ[0] for occ in old_occs))
+                expr_details.append(f"'{rhs}' (in blocks: {blocks}, eliminated {elim}x)")
+            
             events.append(SemanticEvent(
                 category="Optimization",
                 change_type="Common Subexpression Elimination",
-                description="Redundant computations of the same expression were consolidated (CSE).",
+                description=f"Redundant computations were consolidated using shared temporaries across {len(set(o[0] for cse in cse_expressions for o in cse[1]))} block(s).",
                 severity="Medium",
-                details=f"Eliminated {cse_count} duplicate subexpression(s)."
+                details=f"CSE applied to {cse_count} expression(s). " + "; ".join(expr_details) if expr_details else f"Eliminated {cse_count} redundant computation(s) via expression table consolidation."
             ))
+        
         return events
 
 class DeadCodeDetector(BaseDetector):
