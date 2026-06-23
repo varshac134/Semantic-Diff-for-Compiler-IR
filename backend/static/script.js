@@ -119,6 +119,8 @@ document.addEventListener("DOMContentLoaded", () => {
             }
             
             lastAnalysisData = data;
+            console.log("API Response:", JSON.stringify(data.stats));
+            console.log("Changed functions:", Object.keys(data.changed_functions));
             renderResults(data);
             hideLoading();
             
