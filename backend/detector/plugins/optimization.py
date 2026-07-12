@@ -133,15 +133,29 @@ class CommonSubexpressionEliminationDetector(BaseDetector):
         if not inst.opcode or not inst.operands:
             return None
         
-        # Skip load/store/alloca — focus on computation expressions
-        if inst.opcode in ("load", "store", "alloca", "getelementptr", "phi"):
+        # Treat a load from a pointer as just the pointer itself
+        # e.g., %v1 = load i32, ptr %a_addr -> "%a_addr"
+        if inst.opcode == "load":
+            for op in inst.operands:
+                if op.startswith("%") or op.startswith("@"):
+                    return op.rstrip(',')
+            return None
+            
+        # Skip store/alloca/getelementptr
+        if inst.opcode in ("store", "alloca", "getelementptr", "phi"):
             return None
         
         commutative_ops = {"add", "mul", "fadd", "fmul", "and", "or", "xor"}
-        ops = list(inst.operands)
+        ops = [op.rstrip(',') for op in inst.operands]
         
-        if inst.opcode in commutative_ops and len(ops) == 2:
-            ops.sort()
+        if inst.opcode in commutative_ops and len(ops) >= 2:
+            # Sort the last two operands which are usually the values
+            if len(ops) == 2:
+                ops.sort()
+            else:
+                vals = ops[-2:]
+                vals.sort()
+                ops[-2:] = vals
         
         return f"{inst.opcode}({', '.join(ops)})"
     
@@ -239,134 +253,115 @@ class CommonSubexpressionEliminationDetector(BaseDetector):
         old_value_map = self._build_value_map(old_func)
         new_value_map = self._build_value_map(new_func)
         
-        # Step 3: Find expressions that appeared multiple times in old
-        #         but fewer times (or once) in new -> CSE was applied
-        cse_expressions = []
-        cse_count = 0
+        print("DEBUG NEW EXPR TABLE KEYS:", [k for k in new_expr_table.keys() if "(" in k])
+        print("DEBUG OLD EXPR TABLE KEYS:", [k for k in old_expr_table.keys() if "(" in k])
         
-        for rhs, old_occurrences in old_expr_table.items():
-            new_occurrences = new_expr_table.get(rhs, [])
-            
-            if len(old_occurrences) > 1 and len(new_occurrences) < len(old_occurrences):
-                eliminated = len(old_occurrences) - len(new_occurrences)
-                cse_count += eliminated
-                cse_expressions.append((rhs, old_occurrences, eliminated))
+        # Debug
+        print(f"DEBUG {old_func.name} Old Expr Table:", list(old_expr_table.keys()))
+        print(f"DEBUG {new_func.name} New Expr Table:", list(new_expr_table.keys()))
+        print(f"DEBUG {old_func.name} Old Value Map:", old_value_map)
         
-        # Step 4: Deep equivalence check using resolved expressions
-        old_resolved_counts = {}
-        for rhs in old_expr_table:
+        # Step 3: Deep equivalence check using resolved expressions
+        old_resolved_map = {}
+        for rhs, occs in old_expr_table.items():
+            if "(" not in rhs: continue
             resolved = self._resolve_expression(rhs, old_value_map)
-            old_resolved_counts[resolved] = old_resolved_counts.get(resolved, 0) + len(old_expr_table[rhs])
-        
-        new_resolved_counts = {}
-        for rhs in new_expr_table:
-            resolved = self._resolve_expression(rhs, new_value_map)
-            new_resolved_counts[resolved] = new_resolved_counts.get(resolved, 0) + len(new_expr_table[rhs])
-        
-        for resolved_rhs, old_count in old_resolved_counts.items():
-            new_count = new_resolved_counts.get(resolved_rhs, 0)
-            if old_count > 1 and new_count > 0 and new_count < old_count:
-                additional = old_count - new_count
-                if additional > cse_count:
-                    cse_count = additional
-        
-        # Step 5: Check for hoisted temporaries across loops/branches
-        hoisted_count = 0
-        hoisted_exprs = []
-        for rhs, new_occurrences in new_expr_table.items():
-            if len(new_occurrences) == 1:
-                new_block, new_inst, new_lhs = new_occurrences[0]
-                uses_in_blocks = set()
-                for lbl in new_func.block_order:
-                    for inst in new_func.blocks[lbl].instructions:
-                        if new_lhs in inst.operands:
-                            uses_in_blocks.add(lbl)
+            for occ in occs:
+                old_resolved_map.setdefault(resolved, []).append((rhs, occ))
                 
-                if len(uses_in_blocks) > 1:
-                    old_occurrences = old_expr_table.get(rhs, [])
-                    old_blocks_with_expr = {occ[0] for occ in old_occurrences}
-                    
-                    if len(old_blocks_with_expr) > 1:
-                        hoisted = len(old_blocks_with_expr) - 1
-                        hoisted_count += hoisted
-                        hoisted_exprs.append((rhs, new_lhs, uses_in_blocks, hoisted))
+        new_resolved_map = {}
+        for rhs, occs in new_expr_table.items():
+            if "(" not in rhs: continue
+            resolved = self._resolve_expression(rhs, new_value_map)
+            for occ in occs:
+                new_resolved_map.setdefault(resolved, []).append((rhs, occ))
+
+        cse_count = 0
+        unified_cse = []
         
-        cse_count = max(cse_count, hoisted_count)
-        
-        # Step 6: Aggressively claim ALL arithmetic primitive changes
-        #         that involve expressions in our CSE set
+        for resolved_expr, old_items in old_resolved_map.items():
+            new_items = new_resolved_map.get(resolved_expr, [])
+            
+            old_count = len(old_items)
+            new_count = len(new_items)
+            
+            if old_count > 1 and new_count > 0 and new_count < old_count:
+                eliminated = old_count - new_count
+                cse_count += eliminated
+                unified_cse.append({
+                    "resolved": resolved_expr,
+                    "old_items": old_items,
+                    "new_items": new_items,
+                    "eliminated": eliminated
+                })
+
+        # Step 4: Claim primitive changes to avoid Dead Code false positives
         claimed_pcs = []
-        all_cse_opcodes = set()
-        for cse_rhs, old_occs, _ in cse_expressions:
-            for _, inst, _ in old_occs:
-                all_cse_opcodes.add(inst.opcode)
-        
         if cse_count > 0:
             for pc in func_diff.primitive_changes:
                 if getattr(pc, "claimed", False): continue
                 if pc.old_inst and pc.old_inst.category == "Arithmetic":
                     pc_canonical = self._canonical_expression(pc.old_inst)
                     if pc_canonical:
-                        # Direct match
-                        for cse_rhs, old_occs, _ in cse_expressions:
-                            if pc_canonical == cse_rhs:
+                        pc_resolved = self._resolve_expression(pc_canonical, old_value_map)
+                        
+                        claimed = False
+                        for cse_entry in unified_cse:
+                            if pc_resolved == cse_entry["resolved"]:
+                                claimed_pcs.append(pc)
+                                claimed = True
+                                break
+                        if claimed: continue
+                        
+                        # Fallback for similar opcodes inside the CSE
+                        for cse_entry in unified_cse:
+                            if pc.old_inst.opcode in cse_entry["resolved"]:
                                 claimed_pcs.append(pc)
                                 break
-                        else:
-                            # Resolved equivalence match
-                            pc_resolved = self._resolve_expression(pc_canonical, old_value_map)
-                            for cse_rhs, old_occs, _ in cse_expressions:
-                                cse_resolved = self._resolve_expression(cse_rhs, old_value_map)
-                                if pc_resolved == cse_resolved:
-                                    claimed_pcs.append(pc)
-                                    break
-                            else:
-                                # If the opcode matches a CSE'd expression, claim it
-                                if pc.old_inst.opcode in all_cse_opcodes and pc.type == "REMOVE_INSTRUCTION":
-                                    claimed_pcs.append(pc)
+                                
+        for pc in claimed_pcs:
+            pc.claimed = True
+
+        # Step 5: Build generalized output
+        expr_table_rows = []
+        temp_counter = 1
+        all_blocks = set()
+        
+        for cse_entry in unified_cse:
+            # gather blocks
+            for _, occ in cse_entry["old_items"]:
+                all_blocks.add(occ[0])
             
-            for pc in claimed_pcs: pc.claimed = True
+            # just pick the first new lhs representation to show
+            rep_new_rhs, rep_new_occ = cse_entry["new_items"][0]
+            new_lhs = rep_new_occ[2]
+            human = self._human_readable(rep_new_rhs)
             
-            # Step 7: Build the Generalized Expression Table for output
-            expr_table_rows = []
-            temp_counter = 1
-            seen_resolved = set()
+            # Determine if it was hoisted or just standard CSE
+            old_blocks = set(occ[0] for _, occ in cse_entry["old_items"])
+            new_blocks = set(occ[0] for _, occ in cse_entry["new_items"])
             
-            # First from direct CSE matches
-            for rhs, old_occs, elim in cse_expressions:
-                resolved = self._resolve_expression(rhs, old_value_map)
-                if resolved not in seen_resolved:
-                    human = self._human_readable(rhs)
-                    blocks = sorted(set(occ[0] for occ in old_occs))
-                    expr_table_rows.append(f"t{temp_counter} = {human} [found in {', '.join(blocks)}, eliminated {elim}x]")
-                    seen_resolved.add(resolved)
-                    temp_counter += 1
+            if len(old_blocks) > 1 and len(new_blocks) == 1:
+                expr_table_rows.append(f"{new_lhs} = {human} [hoisted, eliminated {cse_entry['eliminated']}x]")
+            else:
+                expr_table_rows.append(f"{new_lhs} = {human} [found in {', '.join(sorted(old_blocks))}, eliminated {cse_entry['eliminated']}x]")
             
-            # Then from hoisted expressions
-            for rhs, new_lhs, use_blocks, hoisted in hoisted_exprs:
-                resolved = self._resolve_expression(rhs, new_value_map)
-                if resolved not in seen_resolved:
-                    human = self._human_readable(rhs)
-                    expr_table_rows.append(f"{new_lhs} = {human} [hoisted, used in {len(use_blocks)} blocks]")
-                    seen_resolved.add(resolved)
-            
-            # Count unique blocks involved
-            all_blocks = set()
-            for _, old_occs, _ in cse_expressions:
-                for occ in old_occs:
-                    all_blocks.add(occ[0])
-            
-            details = f"Expression Table: {'; '.join(expr_table_rows[:8])}"
-            
+            temp_counter += 1
+
+        details = f"Expression Table: {'; '.join(expr_table_rows[:8])}"
+        
+        if cse_count > 0:
             events.append(SemanticEvent(
                 category="Optimization",
                 change_type="Common Subexpression Elimination",
-                description=f"Redundant computations consolidated into shared temporaries across {len(all_blocks)} block(s) and {len(cse_expressions)} expression(s).",
-                severity="Medium",
+                description=f"Redundant computations consolidated into shared temporaries across {len(all_blocks)} block(s) and {len(unified_cse)} expression(s).",
+                severity="High",
                 details=details
             ))
-        
+            
         return events
+
+
 
 class DeadCodeDetector(BaseDetector):
     priority = 10

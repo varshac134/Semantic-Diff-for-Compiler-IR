@@ -203,6 +203,13 @@ def analyze_diff():
         total_deleted = len(diff.deleted_functions)
         total_unchanged = len(diff.unchanged_functions)
         
+        functions_compared = total_changed + total_added + total_deleted + total_unchanged
+        if functions_compared == 0:
+            return jsonify({
+                "error": "No functions found to compare.",
+                "details": f"The parser could not extract any functions from the inputs.\n\nDid you paste C/C++ source code while still in 'IR Mode'?\nIf you have C/C++ code, please switch to the 'Code Mode' tab at the top before clicking Analyze."
+            }), 400
+            
         total_inst_added = 0
         total_inst_deleted = 0
         total_inst_modified = 0
